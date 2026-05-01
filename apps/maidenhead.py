@@ -12,12 +12,12 @@ Usage:
 """
 
 import sys
-import tkinter as tk
 from pathlib import Path
 
-# Import shared Signal K helper
+# Import shared modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.signalk import get_sk_value
+from shared.vnc_window import VNCToolWindow
 
 
 def to_maidenhead(lat, lon):
@@ -48,35 +48,50 @@ def copy_and_exit(text, root):
     root.destroy()
 
 
-def run_app():
-    lat, lon = get_current_position()
+class MaidenheadTool(VNCToolWindow):
+    """Maidenhead grid square calculator."""
 
-    # If no fix, exit silently or print to stderr
-    if lat is None or lon is None:
-        print("Error: Could not retrieve position from Signal K.", file=sys.stderr)
-        sys.exit(1)
+    def __init__(self):
+        super().__init__(title="Grid Square", width=350, height=200)
+        self.setup_ui()
 
-    grid = to_maidenhead(lat, lon)
+    def setup_ui(self):
+        """Build the UI."""
+        lat, lon = get_current_position()
 
-    # Setup the GUI
-    root = tk.Tk()
-    root.title("Grid Square")
-    root.geometry("250x100")
-    root.eval('tk::PlaceWindow . center')
+        # If no fix, show error and exit
+        if lat is None or lon is None:
+            self.show_error("No Position", "Could not retrieve position from Signal K.")
+            self.destroy()
+            return
 
-    # Display the locator in large font
-    label = tk.Label(root, text=grid, font=("Arial", 20, "bold"), pady=10)
-    label.pack()
+        grid = to_maidenhead(lat, lon)
 
-    # Button to copy and exit
-    btn = tk.Button(
-        root, text="Copy & Exit", width=15,
-        command=lambda: copy_and_exit(grid, root)
-    )
-    btn.pack(pady=5)
+        # Display the locator in large font
+        label = tk.Label(
+            self.content_frame,
+            text=grid,
+            font=self.font_xlarge,
+            fg=self.COLOR_FG,
+            bg=self.COLOR_BG
+        )
+        label.pack(pady=20)
 
-    root.mainloop()
+        # Button to copy and exit
+        copy_btn = tk.Button(
+            self.content_frame,
+            text="Copy & Exit",
+            font=self.font_large,
+            command=lambda: copy_and_exit(grid, self),
+            bg="#27ae60",
+            fg="white",
+            padx=20,
+            pady=10
+        )
+        copy_btn.pack(pady=10)
 
 
 if __name__ == "__main__":
-    run_app()
+    import tkinter as tk
+    app = MaidenheadTool()
+    app.mainloop()

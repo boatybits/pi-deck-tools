@@ -12,21 +12,27 @@ Usage:
     python3 hifiberry_volume.py               (on Pi with ALSA/HiFiBerry DAC)
 """
 
+import sys
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 import subprocess
 import threading
 
+# Import shared modules
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared.vnc_window import VNCToolWindow
 
-class VolumeControl:
-    """HiFiBerry volume control UI."""
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title("HiFiBerry Volume Control")
-        self.root.geometry("400x180")
-        self.root.resizable(False, False)
+class HiFiBerryVolumeTool(VNCToolWindow):
+    """HiFiBerry volume control UI using VNC window template."""
 
+    def __init__(self):
+        super().__init__(title="HiFiBerry Volume", width=450, height=280)
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Build the volume control UI."""
         # Variables
         self.left_vol = tk.IntVar(value=150)
         self.right_vol = tk.IntVar(value=150)
@@ -34,11 +40,15 @@ class VolumeControl:
         self.updating = False  # Prevent recursive updates during sync
 
         # Left Channel
-        ttk.Label(root, text="Left Channel:").grid(
-            row=0, column=0, padx=10, pady=10, sticky='w'
+        left_label = ttk.Label(
+            self.content_frame,
+            text="Left Channel:",
+            font=self.font_normal
         )
+        left_label.grid(row=0, column=0, padx=10, pady=10, sticky='w')
+
         self.left_slider = ttk.Scale(
-            root,
+            self.content_frame,
             from_=0,
             to=207,
             orient='horizontal',
@@ -47,15 +57,24 @@ class VolumeControl:
             command=self.on_left_change
         )
         self.left_slider.grid(row=0, column=1, padx=10, pady=10)
-        self.left_label = ttk.Label(root, text="150")
-        self.left_label.grid(row=0, column=2, padx=5)
+
+        self.left_value_label = ttk.Label(
+            self.content_frame,
+            text="150",
+            font=self.font_normal
+        )
+        self.left_value_label.grid(row=0, column=2, padx=5)
 
         # Right Channel
-        ttk.Label(root, text="Right Channel:").grid(
-            row=1, column=0, padx=10, pady=10, sticky='w'
+        right_label = ttk.Label(
+            self.content_frame,
+            text="Right Channel:",
+            font=self.font_normal
         )
+        right_label.grid(row=1, column=0, padx=10, pady=10, sticky='w')
+
         self.right_slider = ttk.Scale(
-            root,
+            self.content_frame,
             from_=0,
             to=207,
             orient='horizontal',
@@ -64,12 +83,17 @@ class VolumeControl:
             command=self.on_right_change
         )
         self.right_slider.grid(row=1, column=1, padx=10, pady=10)
-        self.right_label = ttk.Label(root, text="150")
-        self.right_label.grid(row=1, column=2, padx=5)
+
+        self.right_value_label = ttk.Label(
+            self.content_frame,
+            text="150",
+            font=self.font_normal
+        )
+        self.right_value_label.grid(row=1, column=2, padx=5)
 
         # Sync Checkbox
         self.sync_check = ttk.Checkbutton(
-            root,
+            self.content_frame,
             text="Sync L/R Channels",
             variable=self.sync_enabled,
             command=self.on_sync_toggle
@@ -77,7 +101,11 @@ class VolumeControl:
         self.sync_check.grid(row=2, column=0, columnspan=2, padx=10, pady=15, sticky='w')
 
         # Status Label
-        self.status_label = ttk.Label(root, text="Ready", foreground="green")
+        self.status_label = ttk.Label(
+            self.content_frame,
+            text="Ready",
+            foreground="green"
+        )
         self.status_label.grid(row=3, column=0, columnspan=3, padx=10, pady=5)
 
     def on_left_change(self, value):
@@ -86,12 +114,12 @@ class VolumeControl:
             return
 
         left = int(float(value))
-        self.left_label.config(text=str(left))
+        self.left_value_label.config(text=str(left))
 
         if self.sync_enabled.get():
             self.updating = True
             self.right_vol.set(left)
-            self.right_label.config(text=str(left))
+            self.right_value_label.config(text=str(left))
             self.updating = False
 
         self.update_volume()
@@ -102,12 +130,12 @@ class VolumeControl:
             return
 
         right = int(float(value))
-        self.right_label.config(text=str(right))
+        self.right_value_label.config(text=str(right))
 
         if self.sync_enabled.get():
             self.updating = True
             self.left_vol.set(right)
-            self.left_label.config(text=str(right))
+            self.left_value_label.config(text=str(right))
             self.updating = False
 
         self.update_volume()
@@ -119,7 +147,7 @@ class VolumeControl:
             self.updating = True
             left = self.left_vol.get()
             self.right_vol.set(left)
-            self.right_label.config(text=str(left))
+            self.right_value_label.config(text=str(left))
             self.updating = False
             self.update_volume()
 
@@ -149,6 +177,5 @@ class VolumeControl:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = VolumeControl(root)
-    root.mainloop()
+    app = HiFiBerryVolumeTool()
+    app.mainloop()

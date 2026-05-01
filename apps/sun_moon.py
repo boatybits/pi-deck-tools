@@ -35,9 +35,10 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
 import matplotlib.pyplot as plt
 from io import BytesIO
 
-# Import shared Signal K helper
+# Import shared Signal K helper and VNC window template
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.signalk import get_sk_value
+from shared.vnc_window import VNCToolWindow
 
 # Configuration Constants
 DB_PATH = "/home/pi/.opencpn/navobj.db"
@@ -46,16 +47,18 @@ DATA_DIR = str(Path(__file__).parent.parent / "data")
 EPH_FILE = "de421.bsp"
 COORD_PRECISION = 4
 
-class CelestialCalculator:
+class CelestialCalculator(VNCToolWindow):
+    """Sun/Moon celestial navigation tool using VNC window template."""
+    
     def __init__(self):
+        super().__init__(title="Sun/Moon Navigation", width=650, height=450)
+        
         eph_path = os.path.join(DATA_DIR, EPH_FILE)
         if not os.path.exists(eph_path):
-            messagebox.showerror("Missing Ephemeris", 
+            self.show_error("Missing Ephemeris", 
                 f"Ephemeris file not found at:\n{eph_path}\n\nDownload de421.bsp to {DATA_DIR}")
+            self.destroy()
             sys.exit(1)
-        
-        self.root = tk.Tk()
-        self.root.title("Sun/Moon Navigation")
         
         self.load = Loader(DATA_DIR)
         self.ts = self.load.timescale()
@@ -133,15 +136,15 @@ class CelestialCalculator:
             messagebox.showerror("Database Error", f"Error reading OpenCPN database:\n{e}")
 
     def setup_ui(self):
-        tk.Label(self.root, text="Position (Signal K or Waypoint):").pack(pady=5)
-        self.pos_entry = tk.Entry(self.root, width=55)
+        tk.Label(self.content_frame, text="Position (Signal K or Waypoint):").pack(pady=5)
+        self.pos_entry = tk.Entry(self.content_frame, width=55)
         self.pos_entry.pack(pady=5, padx=10)
         
         initial_pos = self.get_sk_pos()
         self.pos_entry.insert(0, initial_pos)
         self.using_waypoint = False
 
-        btn_frame = tk.Frame(self.root)
+        btn_frame = tk.Frame(self.content_frame)
         btn_frame.pack(pady=10)
         tk.Button(btn_frame, text="Use Sun Waypoint", command=self.get_waypoint_pos).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Calculate", command=self.calculate, bg="green", fg="white").pack(side=tk.LEFT, padx=5)
@@ -220,7 +223,7 @@ class CelestialCalculator:
         res += f"\n{rise_set_text}"
         res += f"\n{meridian_text}"
 
-        self.root.withdraw()
+        self.withdraw()
         self.show_results(res)
 
     def get_constellation_lines(self):
@@ -606,7 +609,7 @@ class CelestialCalculator:
             res += f"      See charts below for visual star field reference"
             
             # Show text results first
-            self.root.withdraw()
+            self.withdraw()
             self.show_results(res)
             
             # Generate charts for dawn and dusk
@@ -1111,7 +1114,7 @@ class CelestialCalculator:
 
     def show_results(self, text):
         """Display results in a scrollable text window."""
-        result_win = tk.Toplevel(self.root)
+        result_win = tk.Toplevel(self)
         result_win.title("Celestial Navigation Results")
         result_win.geometry("800x600")
         
@@ -1128,12 +1131,12 @@ class CelestialCalculator:
         
         def on_close():
             result_win.destroy()
-            self.root.deiconify()
+            self.deiconify()
         
         result_win.protocol("WM_DELETE_WINDOW", on_close)
 
     def run(self):
-        self.root.mainloop()
+        self.mainloop()
 
 if __name__ == "__main__":
     app = CelestialCalculator()
