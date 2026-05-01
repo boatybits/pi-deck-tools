@@ -32,3 +32,7 @@ Thumbs.db
 # Syncthing
 .stfolder/
 .stignore
+
+# Generated reports / downloaded catalogs
+celestial_nav_*.pdf
+data/hip_main.dat
