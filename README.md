@@ -2,6 +2,8 @@
 
 A collection of Python/tkinter utility tools for use aboard a small boat, launched from the **OpenCPN Launcher Plugin** on a Raspberry Pi 5 running inside VNC.
 
+> **Note:** This entire repository — structure, code, and documentation — was created using [GitHub Copilot](https://github.com/features/copilot), with instructions given almost entirely via Windows Speech to Text. No keyboard required.
+
 ## Tools
 
 | Script | Description |
@@ -45,6 +47,10 @@ Signal K server must be running on `localhost:3000`. The tools use the following
 ## OpenCPN Launcher Plugin Setup
 
 See [docs/opencpn_launcher_setup.md](docs/opencpn_launcher_setup.md) for how to wire each script into the launcher.
+
+## Quick Start / Key Links
+
+See [docs/quick_start_links.md](docs/quick_start_links.md) for Pi setup commands, OpenCPN launcher command lines, and links to key external documentation.
 
 ## Development
 
