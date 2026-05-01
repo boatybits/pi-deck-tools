@@ -2,6 +2,8 @@ OpenCPN DB Probe Commands (Pi venv path)
 
 Use these on the Raspberry Pi:
 
+/home/pi/pi-deck-tools/.venv/bin/pip install -r /home/pi/pi-deck-tools/requirements.txt
+
 /home/pi/pi-deck-tools/.venv/bin/python /home/pi/pi-deck-tools/apps/opencpn_db_probe.py --tables
 /home/pi/pi-deck-tools/.venv/bin/python /home/pi/pi-deck-tools/apps/opencpn_db_probe.py --routes
 /home/pi/pi-deck-tools/.venv/bin/python /home/pi/pi-deck-tools/apps/opencpn_db_probe.py --columns waypoint

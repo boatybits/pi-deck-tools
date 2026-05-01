@@ -10,6 +10,9 @@ reportlab>=4.0
 # Plotting (used by sun/moon tool)
 matplotlib>=3.7
 
+# Data handling (Skyfield Hipparcos catalog loading)
+pandas>=2.0
+
 # HTTP (Signal K REST client)
 requests>=2.31
 

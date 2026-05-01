@@ -12,6 +12,10 @@ A collection of Python/tkinter utility tools for use aboard a small boat, launch
 | `apps/hifiberry_volume.py` | L/R channel volume control for a HiFiBerry DAC via ALSA `amixer` |
 | `apps/sun_moon.py` | Sun & moon rise/set/altitude/azimuth from Signal K position; generates printable PDF almanac page |
 
+## Current Sky Chart
+
+![Current sky chart from sun_moon tool](docs/images/current-sky.png)
+
 ## Hardware / Software Stack
 
 - **Hardware:** Raspberry Pi 5, 4 GB RAM, HiFiBerry DAC

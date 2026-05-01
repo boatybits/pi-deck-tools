@@ -16,6 +16,7 @@ Dependencies: skyfield, reportlab, matplotlib, requests
 import sys
 import re
 import os
+import math
 import sqlite3
 import tkinter as tk
 from tkinter import messagebox
@@ -83,6 +84,27 @@ class CelestialCalculator(VNCToolWindow):
         pressure_mbar = (pressure_data / 100.0) if pressure_data else 1013.0
 
         return temp_c, pressure_mbar
+
+    def get_sk_heading_degrees(self):
+        """Return vessel heading in degrees from Signal K, or None if unavailable."""
+        heading_paths = [
+            "navigation/headingTrue/value",
+            "navigation/headingMagnetic/value",
+            "navigation/courseOverGroundTrue/value",
+        ]
+
+        for path in heading_paths:
+            value = get_sk_value(path)
+            if value is None:
+                continue
+            try:
+                # Signal K angular values are typically radians.
+                heading_deg = (math.degrees(float(value)) + 360.0) % 360.0
+                return heading_deg
+            except (TypeError, ValueError):
+                continue
+
+        return None
 
     def format_coords(self, lat, lon):
         ns = "N" if lat >= 0 else "S"
@@ -286,8 +308,51 @@ class CelestialCalculator(VNCToolWindow):
         }
         return constellations
 
+    def az_alt_to_polar(self, az_degrees, alt_degrees):
+        """Convert azimuth/altitude to polar chart coordinates."""
+        theta = math.radians(az_degrees)
+        radius = max(0, min(90, 90 - alt_degrees))
+        return theta, radius
+
+    def get_boat_marker_path(self, heading_degrees):
+        """Build a simple boat-shaped matplotlib marker, rotated to heading."""
+        from matplotlib.path import Path as MplPath
+
+        # A compact boat silhouette in marker-local coordinates.
+        # +Y is "forward" (bow) before rotation.
+        verts = [
+            (0.00, 1.25),   # bow
+            (0.52, 0.20),
+            (0.40, -0.95),
+            (0.00, -0.70),
+            (-0.40, -0.95),
+            (-0.52, 0.20),
+            (0.00, 1.25),
+        ]
+        codes = [
+            MplPath.MOVETO,
+            MplPath.LINETO,
+            MplPath.LINETO,
+            MplPath.LINETO,
+            MplPath.LINETO,
+            MplPath.LINETO,
+            MplPath.CLOSEPOLY,
+        ]
+
+        # Heading is clockwise from north; screen-space rotation is opposite sign.
+        angle = math.radians(-heading_degrees)
+        c = math.cos(angle)
+        s = math.sin(angle)
+        rotated = []
+        for x, y in verts:
+            rx = (x * c) - (y * s)
+            ry = (x * s) + (y * c)
+            rotated.append((rx, ry))
+
+        return MplPath(rotated, codes)
+
     def plot_constellation_lines(self, ax, observer, time, data_json):
-        """Draw constellation lines on the chart."""
+        """Draw constellation lines on the circular all-sky chart."""
         try:
             import json
             from skyfield.api import Star
@@ -329,322 +394,302 @@ class CelestialCalculator(VNCToolWindow):
                         # Handle azimuth wrap-around (0/360 boundary)
                         if abs(az2 - az1) > 180:
                             continue  # Skip lines that cross the boundary
-                        
-                        ax.plot([az1, az2], [alt1, alt2], 
-                               color='cyan', alpha=0.4, linewidth=1, 
+
+                        theta1, radius1 = self.az_alt_to_polar(az1, alt1)
+                        theta2, radius2 = self.az_alt_to_polar(az2, alt2)
+
+                        ax.plot([theta1, theta2], [radius1, radius2], 
+                               color='cyan', alpha=0.22, linewidth=0.8, 
                                linestyle='--', zorder=2)
-            
-            # Add constellation labels at centroid
-            constellation_labels = {
-                'Orion': 'ORION',
-                'Ursa Major': 'URSA MAJOR',
-                'Cassiopeia': 'CASSIOPEIA',
-                'Leo': 'LEO',
-                'Gemini': 'GEMINI',
-                'Scorpius': 'SCORPIUS',
-                'Crux': 'CRUX',
-                'Cygnus': 'CYGNUS',
-            }
-            
-            for const_name in constellations.keys():
-                # Find centroid of visible stars in constellation
-                const_stars = [hip_positions[hip] for line in constellations[const_name] 
-                              for hip in line if hip in hip_positions]
-                if len(const_stars) >= 2:
-                    avg_az = sum(pos[0] for pos in const_stars) / len(const_stars)
-                    avg_alt = sum(pos[1] for pos in const_stars) / len(const_stars)
-                    
-                    ax.text(avg_az, avg_alt, constellation_labels[const_name], 
-                           fontsize=8, color='cyan', alpha=0.6, 
-                           ha='center', va='center', style='italic',
-                           bbox=dict(boxstyle='round,pad=0.3', 
-                                    facecolor='#001133', 
-                                    edgecolor='cyan', 
-                                    alpha=0.3))
             
         except Exception as e:
             print(f"Constellation lines error: {e}")
 
+    def setup_polar_chart_axes(self, ax, period, time_str, compact=False, heading_degrees=None):
+        """Configure a circular all-sky chart with compass orientation."""
+        ax.set_theta_zero_location('N')
+        ax.set_theta_direction(-1)
+        ax.set_ylim(0, 90)
+        ax.set_facecolor('#001133')
+
+        ax.set_thetagrids(
+            [0, 45, 90, 135, 180, 225, 270, 315],
+            labels=['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+        )
+        ax.set_rgrids(
+            [15, 30, 45, 60, 75, 90],
+            labels=['75°', '60°', '45°', '30°', '15°', 'Horizon'],
+            angle=22.5
+        )
+        ax.grid(True, alpha=0.3, color='lightgray', linestyle='--')
+        ax.tick_params(colors='white', which='both')
+        ax.spines['polar'].set_color('white')
+
+        chart_title = f'{period.upper()} Nautical Twilight Sky ({time_str})'
+        if period.lower() == 'current':
+            chart_title = f'Current Sky ({time_str})'
+
+        title_size = 12 if compact else 14
+        ax.set_title(
+            chart_title,
+            fontsize=title_size,
+            color='white',
+            weight='bold',
+            pad=20 if compact else 24
+        )
+
+        # Boat / observer marker at center, rotated to match vessel heading.
+        heading = heading_degrees if heading_degrees is not None else 0.0
+        boat_marker = self.get_boat_marker_path(heading)
+        ax.scatter(0, 0, s=260, marker=boat_marker, color='deepskyblue',
+               edgecolors='white', linewidths=1.2, zorder=12)
+
+        # Faint heading line from center toward the heading direction.
+        heading_theta = math.radians(heading)
+        ax.plot([heading_theta, heading_theta], [0, 10], color='deepskyblue',
+            alpha=0.55, linewidth=1.2, zorder=11)
+
+        if heading_degrees is not None:
+            ax.text(0, 6, f'Boat {heading:.0f}°', fontsize=8 if compact else 9,
+                color='deepskyblue', ha='center', va='center', weight='bold')
+        else:
+            ax.text(0, 6, 'Boat', fontsize=8 if compact else 9,
+                color='deepskyblue', ha='center', va='center', weight='bold')
+
+    def plot_sky_objects(self, ax, data, compact=False):
+        """Plot stars, sun, and moon on the circular sky chart."""
+        labels_added = set()
+        label_sizes = {
+            'bold': 7 if compact else 8,
+            'bright': 6 if compact else 7,
+            'medium': 5 if compact else 6,
+            'moon': 7 if compact else 8,
+            'sun': 7 if compact else 8,
+        }
+
+        marker_sizes = {
+            'bold': 120,
+            'bright': 120,
+            'medium': 28,
+            'moon': 120,
+            'sun': 110,
+        }
+
+        for item in data:
+            az = item['az']
+            alt = item['alt']
+            name = item['name']
+            star_type = item['type']
+            theta, radius = self.az_alt_to_polar(az, alt)
+
+            if star_type in ('bold', 'bright', 'medium'):
+                label_radius = max(0, radius - 2.6)
+                label_color = 'yellow' if star_type == 'bold' else ('white' if star_type == 'bright' else '#c8d0d8')
+                label_weight = 'bold' if star_type == 'bold' else 'normal'
+                ax.text(theta, label_radius, name,
+                        fontsize=label_sizes[star_type], color=label_color,
+                        ha='center', va='center', weight=label_weight,
+                        alpha=0.95 if star_type != 'medium' else 0.75, zorder=11)
+
+            if star_type == 'bold':
+                ax.scatter(theta, radius, s=marker_sizes['bold'], marker='*', color='gold',
+                           edgecolors='orange', linewidths=1.4, zorder=10,
+                           label='Top 5 Stars' if 'bold' not in labels_added else None)
+                labels_added.add('bold')
+            elif star_type == 'bright':
+                ax.scatter(theta, radius, s=marker_sizes['bright'], marker='o', color='white',
+                           edgecolors='gray', linewidths=0.9, zorder=5,
+                           label='Bright Reference' if 'bright' not in labels_added else None)
+                labels_added.add('bright')
+            elif star_type == 'medium':
+                ax.scatter(theta, radius, s=marker_sizes['medium'], marker='o', color='lightgray',
+                           edgecolors='darkgray', linewidths=0.4, zorder=3,
+                           alpha=0.9, label=None)
+            elif star_type == 'moon':
+                ax.scatter(theta, radius, s=marker_sizes['moon'], marker='D', color='orange',
+                           edgecolors='gold', linewidths=1.4, zorder=8,
+                           label='Moon' if 'moon' not in labels_added else None)
+                labels_added.add('moon')
+                ax.text(theta, max(0, radius - 2.8), name,
+                        fontsize=label_sizes['moon'], color='orange',
+                        ha='center', va='center', weight='bold')
+            elif star_type == 'sun':
+                ax.scatter(theta, radius, s=marker_sizes['sun'], marker='v', color='red',
+                           edgecolors='darkred', linewidths=1.4, zorder=8,
+                           label='Sun (-12°)' if 'sun' not in labels_added else None)
+                labels_added.add('sun')
+                ax.text(theta, min(88, radius + 2.8), name,
+                        fontsize=label_sizes['sun'], color='red',
+                        ha='center', va='center', weight='bold')
+
+    def add_chart_legend(self, ax, compact=False):
+        """Add legend and explanatory annotation to the chart."""
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            by_label = dict(zip(labels, handles))
+            ax.legend(
+                by_label.values(), by_label.keys(),
+                loc='upper right', fontsize=9 if compact else 10,
+                facecolor='#002255', edgecolor='white',
+                labelcolor='white', framealpha=0.8
+            )
+
+        ax.text(
+            0.98, 0.02,
+            'Center = Zenith / Boat   Outer ring = Horizon   Labels = all plotted stars',
+            transform=ax.transAxes,
+            fontsize=8 if compact else 9,
+            color='white',
+            ha='right', va='bottom',
+            bbox=dict(boxstyle='round', facecolor='#002255', alpha=0.8, edgecolor='white')
+        )
+
     def calculate_stars(self):
-        """Calculate brightest stars visible during nautical twilight."""
+        """Calculate a simplified current-time star reference chart."""
         lat, lon = self.parse_position()
         if lat is None:
             messagebox.showerror("Format Error", "Use format: 32° 27.84' N  040° 53.99' W")
             return
-        
+
         try:
-            # Load Hipparcos star catalog
             with self.load.open(hipparcos.URL) as f:
                 df = hipparcos.load_dataframe(f)
-            
-            # Filter brightest stars (Vmag <= 2.4 for chart)
-            df_chart = df[df['magnitude'] <= 3.0].copy()
+
+            df_chart = df[df['magnitude'] <= 2.2].copy()
             df_chart = df_chart[df_chart['ra_degrees'].notnull()]
-            
-            # Filter brightest stars (Vmag <= 1.5 for table)
+
             df_table = df[df['magnitude'] <= 1.5].copy()
             df_table = df_table[df_table['ra_degrees'].notnull()]
-            
+
             topos = wgs84.latlon(lat, lon)
             observer = self.earth + topos
             t = self.ts.now()
-            
-            # Calculate zone offset
+
             self.zone_hours = round(lon / 15)
-            
-            # Find nautical twilight times (both dawn and dusk)
-            t0 = self.ts.utc(t.utc_datetime().year, t.utc_datetime().month, t.utc_datetime().day, 0, 0, 0)
-            t1 = self.ts.utc(t.utc_datetime().year, t.utc_datetime().month, t.utc_datetime().day, 23, 59, 59)
-            
-            f = almanac.dark_twilight_day(self.eph, topos)
-            times, events = almanac.find_discrete(t0, t1, f)
-            
-            # Find dawn and dusk nautical twilight times
-            dawn_time = None
-            dusk_time = None
-            
-            for i, (ti, event) in enumerate(zip(times, events)):
-                if event == 2 and ti.utc_datetime().hour < 12 and dawn_time is None:
-                    dawn_time = ti
-                elif event == 2 and ti.utc_datetime().hour >= 12 and dusk_time is None:
-                    dusk_time = ti
-            
-            if dusk_time is None:
-                for ti, event in zip(times, events):
-                    if event == 2 and ti.utc_datetime().hour >= 18:
-                        dusk_time = ti
-                        break
-            
-            # Build output with both dawn and dusk
+            zone_desc = f"(Zone {self.zone_hours:+d})" if self.zone_hours != 0 else "(Zone 0)"
+            local_time = t.utc_datetime() + timedelta(hours=self.zone_hours)
+
+            moon_p = observer.at(t).observe(self.eph['moon']).apparent()
+            m_alt, m_az, _ = moon_p.altaz()
+
+            sun_p = observer.at(t).observe(self.eph['sun']).apparent()
+            s_alt, s_az, _ = sun_p.altaz()
+
+            stars_table = Star.from_dataframe(df_table)
+            apparent_table = observer.at(t).observe(stars_table).apparent()
+            alt_table, az_table, _ = apparent_table.altaz()
+            _, dec_table, _ = apparent_table.radec()
+
+            mask_table = (alt_table.degrees > 15) & (alt_table.degrees < 75)
+            visible_indices_table = df_table.index[mask_table].tolist()
+
+            visible_df_table = df_table.loc[visible_indices_table].copy()
+            visible_df_table['altitude'] = alt_table.degrees[mask_table]
+            visible_df_table['azimuth'] = az_table.degrees[mask_table]
+            visible_df_table['declination'] = dec_table.degrees[mask_table]
+            visible_df_table = visible_df_table.sort_values('magnitude').head(5)
+            top_star_ids = set(visible_df_table.index.tolist())
+
+            stars_chart = Star.from_dataframe(df_chart)
+            apparent_chart = observer.at(t).observe(stars_chart).apparent()
+            alt_chart, az_chart, _ = apparent_chart.altaz()
+
+            mask_chart = alt_chart.degrees > 10
+            visible_chart_indices = df_chart.index[mask_chart]
+
+            current_data = []
+            for i, idx in enumerate(visible_chart_indices):
+                altitude = alt_chart.degrees[mask_chart][i]
+                azimuth = az_chart.degrees[mask_chart][i]
+                magnitude = df_chart.loc[idx, 'magnitude']
+
+                current_data.append({
+                    'name': self.get_star_name(idx),
+                    'az': float(azimuth),
+                    'alt': float(altitude),
+                    'mag': float(magnitude),
+                    'type': 'bold' if idx in top_star_ids else ('bright' if magnitude <= 1.5 else 'medium'),
+                    'twilight': 'current'
+                })
+
+            if m_alt.degrees > 0:
+                current_data.append({
+                    'name': 'Moon',
+                    'az': float(m_az.degrees),
+                    'alt': float(m_alt.degrees),
+                    'phase': 0.65,
+                    'type': 'moon',
+                    'twilight': 'current'
+                })
+
+            if s_alt.degrees > -18:
+                current_data.append({
+                    'name': 'Sun',
+                    'az': float(s_az.degrees),
+                    'alt': float(s_alt.degrees),
+                    'type': 'sun',
+                    'twilight': 'current'
+                })
+
             res = f"═══════════════════════════════════════════════════════════════════\n"
-            res += f"         BRIGHTEST STARS - NAUTICAL TWILIGHT\n"
+            res += f"            CURRENT SKY REFERENCE\n"
             res += f"═══════════════════════════════════════════════════════════════════\n"
             res += f"Date (UTC):  {t.utc_strftime('%Y %B %d, %A')}\n"
+            res += f"Time (UTC):  {t.utc_strftime('%H:%M:%S')}\n"
+            res += f"Time (LMT):  {local_time.strftime('%H:%M:%S')} {zone_desc}\n"
             res += f"Position:    {self.format_lat_lon_almanac(lat, lon)}\n"
+            heading_deg = self.get_sk_heading_degrees()
+
             res += f"───────────────────────────────────────────────────────────────────\n"
-            
-            zone_desc = f"(Zone {self.zone_hours:+d})" if self.zone_hours != 0 else "(Zone 0)"
-            
-            chart_data = []
-            dawn_data = []
-            dusk_data = []
-            
-            # DAWN SECTION
-            if dawn_time is not None:
-                local_dawn = dawn_time.utc_datetime() + timedelta(hours=self.zone_hours)
-                res += f"\n### DAWN NAUTICAL TWILIGHT ###\n"
-                res += f"Time (UTC):  {dawn_time.utc_strftime('%H:%M:%S')}\n"
-                res += f"Time (LMT):  {local_dawn.strftime('%H:%M:%S')} {zone_desc}\n\n"
-                
-                # Calculate moon position at dawn
-                moon_p = observer.at(dawn_time).observe(self.eph['moon']).apparent()
-                m_alt, m_az, _ = moon_p.altaz()
-                res += f"Moon:        Alt {m_alt.degrees:5.1f}°   Az {m_az.degrees:6.1f}°"
-                if m_alt.degrees > 0:
-                    res += f"   (Visible)\n"
-                else:
-                    res += f"   (Below horizon)\n"
-                
-                # Calculate stars at dawn for table
-                stars_table = Star.from_dataframe(df_table)
-                astrometric_table = observer.at(dawn_time).observe(stars_table)
-                apparent_table = astrometric_table.apparent()
-                
-                alt_table, az_table, _ = apparent_table.altaz()
-                ra_table, dec_table, _ = apparent_table.radec()
-                
-                mask_table = (alt_table.degrees > 15) & (alt_table.degrees < 75)
-                visible_indices_table = df_table.index[mask_table].tolist()
-                
-                visible_df_table = df_table.loc[visible_indices_table].copy()
-                visible_df_table['altitude'] = alt_table.degrees[mask_table]
-                visible_df_table['azimuth'] = az_table.degrees[mask_table]
-                visible_df_table['declination'] = dec_table.degrees[mask_table]
-                visible_df_table = visible_df_table.sort_values('magnitude').head(5)
-                
-                res += f"\nSTAR NAME          Vmag    Alt      Az       Dec\n"
-                res += f"───────────────────────────────────────────────────────────────────\n"
-                
-                for idx, row in visible_df_table.iterrows():
-                    star_name = self.get_star_name(idx)
-                    res += f"{star_name:15s}   {row['magnitude']:4.2f}   {row['altitude']:5.1f}°   {row['azimuth']:6.1f}°   {self.format_dec_dms(row['declination'])}\n"
-                
-                # Calculate all stars for chart (Vmag <= 2.4)
-                stars_chart = Star.from_dataframe(df_chart)
-                astrometric_chart = observer.at(dawn_time).observe(stars_chart)
-                apparent_chart = astrometric_chart.apparent()
-                
-                alt_chart, az_chart, _ = apparent_chart.altaz()
-                ra_chart, dec_chart, _ = apparent_chart.radec()
-                
-                mask_chart = alt_chart.degrees > 0
-                visible_chart_indices = df_chart.index[mask_chart]
-                
-                for i, idx in enumerate(visible_chart_indices):
-                    a = alt_chart.degrees[mask_chart][i]
-                    z = az_chart.degrees[mask_chart][i]
-                    mag = df_chart.loc[idx, 'magnitude']
-                    
-                    dawn_data.append({
-                        'name': self.get_star_name(idx),
-                        'az': float(z),
-                        'alt': float(a),
-                        'mag': float(mag),
-                        'type': 'bold' if mag <= 0.1 else ('bright' if mag <= 1.5 else 'medium'),
-                        'twilight': 'dawn'
-                    })
-                
-                # Add Moon to dawn chart
-                if m_alt.degrees > 0:
-                    dawn_data.append({
-                        'name': 'Moon',
-                        'az': float(m_az.degrees),
-                        'alt': float(m_alt.degrees),
-                        'phase': 0.65,
-                        'type': 'moon',
-                        'twilight': 'dawn'
-                    })
-                
-                # Add Sun at nautical twilight position for dawn
-                sun_p = observer.at(dawn_time).observe(self.eph['sun']).apparent()
-                s_alt, s_az, _ = sun_p.altaz()
-                dawn_data.append({
-                    'name': 'Sun',
-                    'az': float(s_az.degrees),
-                    'alt': float(s_alt.degrees),
-                    'type': 'sun',
-                    'twilight': 'dawn'
-                })
-            
-            # DUSK SECTION
-            if dusk_time is not None:
-                local_dusk = dusk_time.utc_datetime() + timedelta(hours=self.zone_hours)
-                res += f"\n### DUSK NAUTICAL TWILIGHT ###\n"
-                res += f"Time (UTC):  {dusk_time.utc_strftime('%H:%M:%S')}\n"
-                res += f"Time (LMT):  {local_dusk.strftime('%H:%M:%S')} {zone_desc}\n\n"
-                
-                # Calculate moon position at dusk
-                moon_p = observer.at(dusk_time).observe(self.eph['moon']).apparent()
-                m_alt, m_az, _ = moon_p.altaz()
-                res += f"Moon:        Alt {m_alt.degrees:5.1f}°   Az {m_az.degrees:6.1f}°"
-                if m_alt.degrees > 0:
-                    res += f"   (Visible)\n"
-                else:
-                    res += f"   (Below horizon)\n"
-                
-                # Calculate stars at dusk for table
-                stars_table = Star.from_dataframe(df_table)
-                astrometric_table = observer.at(dusk_time).observe(stars_table)
-                apparent_table = astrometric_table.apparent()
-                
-                alt_table, az_table, _ = apparent_table.altaz()
-                ra_table, dec_table, _ = apparent_table.radec()
-                
-                mask_table = (alt_table.degrees > 15) & (alt_table.degrees < 75)
-                visible_indices_table = df_table.index[mask_table].tolist()
-                
-                visible_df_table = df_table.loc[visible_indices_table].copy()
-                visible_df_table['altitude'] = alt_table.degrees[mask_table]
-                visible_df_table['azimuth'] = az_table.degrees[mask_table]
-                visible_df_table['declination'] = dec_table.degrees[mask_table]
-                visible_df_table = visible_df_table.sort_values('magnitude').head(5)
-                
-                res += f"\nSTAR NAME          Vmag    Alt      Az       Dec\n"
-                res += f"───────────────────────────────────────────────────────────────────\n"
-                
-                for idx, row in visible_df_table.iterrows():
-                    star_name = self.get_star_name(idx)
-                    res += f"{star_name:15s}   {row['magnitude']:4.2f}   {row['altitude']:5.1f}°   {row['azimuth']:6.1f}°   {self.format_dec_dms(row['declination'])}\n"
-                
-                # Calculate all stars for chart (Vmag <= 2.4)
-                stars_chart = Star.from_dataframe(df_chart)
-                astrometric_chart = observer.at(dusk_time).observe(stars_chart)
-                apparent_chart = astrometric_chart.apparent()
-                
-                alt_chart, az_chart, _ = apparent_chart.altaz()
-                ra_chart, dec_chart, _ = apparent_chart.radec()
-                
-                mask_chart = alt_chart.degrees > 0
-                visible_chart_indices = df_chart.index[mask_chart]
-                
-                for i, idx in enumerate(visible_chart_indices):
-                    a = alt_chart.degrees[mask_chart][i]
-                    z = az_chart.degrees[mask_chart][i]
-                    mag = df_chart.loc[idx, 'magnitude']
-                    
-                    dusk_data.append({
-                        'name': self.get_star_name(idx),
-                        'az': float(z),
-                        'alt': float(a),
-                        'mag': float(mag),
-                        'type': 'bold' if mag <= 0.1 else ('bright' if mag <= 1.5 else 'medium'),
-                        'twilight': 'dusk'
-                    })
-                
-                # Add Moon to dusk chart
-                if m_alt.degrees > 0:
-                    dusk_data.append({
-                        'name': 'Moon',
-                        'az': float(m_az.degrees),
-                        'alt': float(m_alt.degrees),
-                        'phase': 0.65,
-                        'type': 'moon',
-                        'twilight': 'dusk'
-                    })
-                
-                # Add Sun at nautical twilight position for dusk
-                sun_p = observer.at(dusk_time).observe(self.eph['sun']).apparent()
-                s_alt, s_az, _ = sun_p.altaz()
-                dusk_data.append({
-                    'name': 'Sun',
-                    'az': float(s_az.degrees),
-                    'alt': float(s_alt.degrees),
-                    'type': 'sun',
-                    'twilight': 'dusk'
-                })
-            
+            res += f"Sun:         Alt {s_alt.degrees:5.1f}°   Az {s_az.degrees:6.1f}°\n"
+            res += f"Moon:        Alt {m_alt.degrees:5.1f}°   Az {m_az.degrees:6.1f}°"
+            if m_alt.degrees > 0:
+                res += f"   (Visible)\n"
+            else:
+                res += f"   (Below horizon)\n"
+            if heading_deg is not None:
+                res += f"Heading:     {heading_deg:6.1f}° (from Signal K)\n"
+            else:
+                res += f"Heading:     unavailable from Signal K\n"
+
+            res += f"\nTOP REFERENCE STARS NOW\n"
+            res += f"───────────────────────────────────────────────────────────────────\n"
+            res += f"STAR NAME          Vmag    Alt      Az       Dec\n"
+            res += f"───────────────────────────────────────────────────────────────────\n"
+
+            for idx, row in visible_df_table.iterrows():
+                star_name = self.get_star_name(idx)
+                res += f"{star_name:15s}   {row['magnitude']:4.2f}   {row['altitude']:5.1f}°   {row['azimuth']:6.1f}°   {self.format_dec_dms(row['declination'])}\n"
+
             res += f"\n───────────────────────────────────────────────────────────────────\n"
-            res += f"Note: Stars listed at nautical twilight (Sun altitude -12°)\n"
-            res += f"      Altitude range: 15° - 75° (optimal for sextant sights)\n"
-            res += f"      See charts below for visual star field reference"
-            
-            # Show text results first
+            res += f"Note: Circular chart shows the sky right now.\n"
+            res += f"      Center = zenith above the boat, outer ring = horizon.\n"
+            res += f"      Only the key stars, Sun, and Moon are labelled."
+
             self.withdraw()
             self.show_results(res)
-            
-            # Generate charts for dawn and dusk
-            dawn_json = json.dumps(dawn_data) if dawn_data else None
-            dusk_json = json.dumps(dusk_data) if dusk_data else None
-            
-            if dawn_data and dawn_time is not None:
-                self.create_twilight_chart(dawn_json, "dawn", 
-                                          dawn_time.utc_strftime('%H:%M UTC'),
-                                          observer, dawn_time)
-            
-            if dusk_data and dusk_time is not None:
-                self.create_twilight_chart(dusk_json, "dusk", 
-                                          dusk_time.utc_strftime('%H:%M UTC'),
-                                          observer, dusk_time)
-            
-            # Export to PDF
-            pdf_filename = self.export_to_pdf(
-                res,
-                dawn_json if dawn_data else None,
-                dusk_json if dusk_data else None,
-                dawn_time if dawn_data else None,
-                dusk_time if dusk_data else None,
-                observer
-            )
-            
+
+            current_json = json.dumps(current_data) if current_data else None
+            if current_data:
+                self.create_twilight_chart(
+                    current_json,
+                    "current",
+                    t.utc_strftime('%H:%M UTC'),
+                    observer,
+                    t,
+                    heading_degrees=heading_deg
+                )
+
+            pdf_filename = self.export_to_pdf(res)
             if pdf_filename:
                 print(f"\n✓ PDF saved to: {os.path.abspath(pdf_filename)}")
-            
+
         except Exception as e:
             import traceback
             messagebox.showerror("Star Calculation Error", f"Error calculating stars:\n{e}\n\n{traceback.format_exc()}")
 
-    def create_twilight_chart(self, data_json, period, time_str, observer, time):
-        """Create azimuth-altitude chart for dawn or dusk using matplotlib."""
+    def create_twilight_chart(self, data_json, period, time_str, observer, time, heading_degrees=None):
+        """Create circular all-sky chart for dawn or dusk using matplotlib."""
         try:
             import matplotlib
             matplotlib.use('TkAgg')  # Interactive backend for display
@@ -652,100 +697,13 @@ class CelestialCalculator(VNCToolWindow):
             data = json.loads(data_json)
             
             # Create figure
-            fig, ax = plt.subplots(figsize=(12, 8))
+            fig, ax = plt.subplots(figsize=(10, 10), subplot_kw={'projection': 'polar'})
             fig.patch.set_facecolor('#001133')
-            ax.set_facecolor('#001133')
-            
-            # Plot stars by type
-            bold_added = False
-            bright_added = False
-            medium_added = False
-            moon_added = False
-            sun_added = False
-            
-            for item in data:
-                az = item['az']
-                alt = item['alt']
-                name = item['name']
-                star_type = item['type']
-                
-                if star_type == 'bold':
-                    if not bold_added:
-                        ax.scatter(az, alt, s=350, marker='*', color='gold', edgecolors='orange', linewidths=2, zorder=10, label='Top 5 Stars')
-                        bold_added = True
-                    else:
-                        ax.scatter(az, alt, s=350, marker='*', color='gold', edgecolors='orange', linewidths=2, zorder=10)
-                    ax.text(az, alt+3, name, fontsize=10, color='yellow', ha='center', weight='bold')
-                elif star_type == 'bright':
-                    if not bright_added:
-                        ax.scatter(az, alt, s=120, marker='o', color='white', edgecolors='gray', linewidths=1, zorder=5, label='Bright Reference')
-                        bright_added = True
-                    else:
-                        ax.scatter(az, alt, s=120, marker='o', color='white', edgecolors='gray', linewidths=1, zorder=5)
-                    ax.text(az, alt+2, name, fontsize=8, color='white', ha='center')
-                elif star_type == 'medium':
-                    if not medium_added:
-                        ax.scatter(az, alt, s=60, marker='o', color='lightgray', edgecolors='darkgray', linewidths=0.5, zorder=3, label='Medium Reference')
-                        medium_added = True
-                    else:
-                        ax.scatter(az, alt, s=60, marker='o', color='lightgray', edgecolors='darkgray', linewidths=0.5, zorder=3)
-                elif star_type == 'moon':
-                    if not moon_added:
-                        ax.scatter(az, alt, s=200, marker='D', color='orange', edgecolors='gold', linewidths=2, zorder=8, label='Moon')
-                        moon_added = True
-                    else:
-                        ax.scatter(az, alt, s=200, marker='D', color='orange', edgecolors='gold', linewidths=2, zorder=8)
-                    ax.text(az, alt+3, name, fontsize=10, color='orange', ha='center', weight='bold')
-                elif star_type == 'sun':
-                    if not sun_added:
-                        ax.scatter(az, alt, s=150, marker='v', color='red', edgecolors='darkred', linewidths=2, zorder=8, label='Sun (-12°)')
-                        sun_added = True
-                    else:
-                        ax.scatter(az, alt, s=150, marker='v', color='red', edgecolors='darkred', linewidths=2, zorder=8)
-                    ax.text(az, alt-4, name, fontsize=10, color='red', ha='center', weight='bold')
-            
-            # Draw constellation lines
+
+            self.setup_polar_chart_axes(ax, period, time_str, compact=False, heading_degrees=heading_degrees)
+            self.plot_sky_objects(ax, data, compact=False)
             self.plot_constellation_lines(ax, observer, time, data_json)
-            
-            # Horizon line
-            ax.axhline(y=0, color='black', linewidth=3, zorder=1)
-            
-            # Grid
-            ax.grid(True, alpha=0.3, color='lightgray', linestyle='--')
-            
-            # Axis setup
-            ax.set_xlim(0, 360)
-            ax.set_ylim(-5, 90)
-            ax.set_xticks([0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360])
-            ax.set_xticklabels(['N\n0°', '30°', '60°', 'E\n90°', '120°', '150°', 'S\n180°', '210°', '240°', 'W\n270°', '300°', '330°', '360°'])
-            ax.set_yticks([0, 15, 30, 45, 60, 75, 90])
-            
-            # Labels
-            ax.set_xlabel('Azimuth (0°=N, 90°=E, 180°=S, 270°=W)', fontsize=12, color='white')
-            ax.set_ylabel('Altitude°', fontsize=12, color='white')
-            ax.set_title(f'{period.upper()} Nautical Twilight Star Field ({time_str})', 
-                         fontsize=14, color='white', weight='bold', pad=20)
-            
-            # Tick colors
-            ax.tick_params(colors='white', which='both')
-            for spine in ax.spines.values():
-                spine.set_color('white')
-            
-            # Legend
-            handles, labels = ax.get_legend_handles_labels()
-            if handles:
-                # Remove duplicates
-                by_label = dict(zip(labels, handles))
-                ax.legend(by_label.values(), by_label.keys(), 
-                         loc='upper right', fontsize=10, 
-                         facecolor='#002255', edgecolor='white', 
-                         labelcolor='white', framealpha=0.8)
-            
-            # Annotation
-            ax.text(0.98, 0.02, '★ Top 5 | ● Bright | ○ Medium | ◆ Moon | ▼ Sun',
-                   transform=ax.transAxes, fontsize=9, color='white',
-                   ha='right', va='bottom', bbox=dict(boxstyle='round', 
-                   facecolor='#002255', alpha=0.8, edgecolor='white'))
+            self.add_chart_legend(ax, compact=False)
             
             plt.tight_layout()
             plt.show()
@@ -755,8 +713,8 @@ class CelestialCalculator(VNCToolWindow):
             print(f"Chart creation error: {e}")
             print(traceback.format_exc())
 
-    def generate_chart_image(self, data_json, period, time_str, observer, time):
-        """Generate chart as PIL Image for PDF embedding."""
+    def generate_chart_image(self, data_json, period, time_str, observer, time, heading_degrees=None):
+        """Generate circular all-sky chart as image for PDF embedding."""
         try:
             import matplotlib
             matplotlib.use('Agg')  # Non-interactive backend
@@ -764,93 +722,13 @@ class CelestialCalculator(VNCToolWindow):
             data = json.loads(data_json)
             
             # Create figure
-            fig, ax = plt.subplots(figsize=(10, 7))
+            fig, ax = plt.subplots(figsize=(8.5, 8.5), subplot_kw={'projection': 'polar'})
             fig.patch.set_facecolor('#001133')
-            ax.set_facecolor('#001133')
-            
-            # Plot stars by type
-            bold_added = False
-            bright_added = False
-            medium_added = False
-            moon_added = False
-            sun_added = False
-            
-            for item in data:
-                az = item['az']
-                alt = item['alt']
-                name = item['name']
-                star_type = item['type']
-                
-                if star_type == 'bold':
-                    if not bold_added:
-                        ax.scatter(az, alt, s=350, marker='*', color='gold', edgecolors='orange', linewidths=2, zorder=10, label='Top 5 Stars')
-                        bold_added = True
-                    else:
-                        ax.scatter(az, alt, s=350, marker='*', color='gold', edgecolors='orange', linewidths=2, zorder=10)
-                    ax.text(az, alt+3, name, fontsize=9, color='yellow', ha='center', weight='bold')
-                elif star_type == 'bright':
-                    if not bright_added:
-                        ax.scatter(az, alt, s=120, marker='o', color='white', edgecolors='gray', linewidths=1, zorder=5, label='Bright Reference')
-                        bright_added = True
-                    else:
-                        ax.scatter(az, alt, s=120, marker='o', color='white', edgecolors='gray', linewidths=1, zorder=5)
-                    ax.text(az, alt+2, name, fontsize=7, color='white', ha='center')
-                elif star_type == 'medium':
-                    if not medium_added:
-                        ax.scatter(az, alt, s=60, marker='o', color='lightgray', edgecolors='darkgray', linewidths=0.5, zorder=3, label='Medium Reference')
-                        medium_added = True
-                    else:
-                        ax.scatter(az, alt, s=60, marker='o', color='lightgray', edgecolors='darkgray', linewidths=0.5, zorder=3)
-                elif star_type == 'moon':
-                    if not moon_added:
-                        ax.scatter(az, alt, s=200, marker='D', color='orange', edgecolors='gold', linewidths=2, zorder=8, label='Moon')
-                        moon_added = True
-                    else:
-                        ax.scatter(az, alt, s=200, marker='D', color='orange', edgecolors='gold', linewidths=2, zorder=8)
-                    ax.text(az, alt+3, name, fontsize=9, color='orange', ha='center', weight='bold')
-                elif star_type == 'sun':
-                    if not sun_added:
-                        ax.scatter(az, alt, s=150, marker='v', color='red', edgecolors='darkred', linewidths=2, zorder=8, label='Sun (-12°)')
-                        sun_added = True
-                    else:
-                        ax.scatter(az, alt, s=150, marker='v', color='red', edgecolors='darkred', linewidths=2, zorder=8)
-                    ax.text(az, alt-4, name, fontsize=9, color='red', ha='center', weight='bold')
-            
-            # Draw constellation lines
+
+            self.setup_polar_chart_axes(ax, period, time_str, compact=True, heading_degrees=heading_degrees)
+            self.plot_sky_objects(ax, data, compact=True)
             self.plot_constellation_lines(ax, observer, time, data_json)
-            
-            # Horizon line
-            ax.axhline(y=0, color='black', linewidth=3, zorder=1)
-            
-            # Grid
-            ax.grid(True, alpha=0.3, color='lightgray', linestyle='--')
-            
-            # Axis setup
-            ax.set_xlim(0, 360)
-            ax.set_ylim(-5, 90)
-            ax.set_xticks([0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360])
-            ax.set_xticklabels(['N\n0°', '30°', '60°', 'E\n90°', '120°', '150°', 'S\n180°', '210°', '240°', 'W\n270°', '300°', '330°', '360°'], fontsize=8)
-            ax.set_yticks([0, 15, 30, 45, 60, 75, 90])
-            
-            # Labels
-            ax.set_xlabel('Azimuth (0°=N, 90°=E, 180°=S, 270°=W)', fontsize=11, color='white')
-            ax.set_ylabel('Altitude°', fontsize=11, color='white')
-            ax.set_title(f'{period.upper()} Nautical Twilight Sky ({time_str})', 
-                         fontsize=12, color='white', weight='bold', pad=15)
-            
-            # Tick colors
-            ax.tick_params(colors='white', which='both')
-            for spine in ax.spines.values():
-                spine.set_color('white')
-            
-            # Legend
-            handles, labels = ax.get_legend_handles_labels()
-            if handles:
-                by_label = dict(zip(labels, handles))
-                ax.legend(by_label.values(), by_label.keys(), 
-                         loc='upper right', fontsize=9, 
-                         facecolor='#002255', edgecolor='white', 
-                         labelcolor='white', framealpha=0.8)
+            self.add_chart_legend(ax, compact=True)
             
             # Save to BytesIO
             img_buffer = BytesIO()
