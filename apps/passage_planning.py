@@ -25,6 +25,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+from tksheet import Sheet
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.grib_reader import GribReader
@@ -93,7 +95,31 @@ class PassagePlanningTool(VNCToolWindow):
         self.route_data: dict | None = None
         self.route_names: list[str] = []
         self.grib_reader: GribReader | None = None
+        self.table_headers = [
+            "UTC",
+            "Leg",
+            "Lat",
+            "Lon",
+            "Course T",
+            "Run NM",
+            "Remain NM",
+            "TWD°",
+            "TWS kt",
+            "TWA°",
+            "AWS kt",
+            "AWA°",
+            "WvDir°",
+            "WvAng°",
+            "WvHt m",
+        ]
+        self.twa_column_index = 9
+        # Timeline slider state
+        self._slider_dragging = False
+        self._slider_drag_start_x = 0
+        self._slider_drag_start_frac = 0.0
         self.setup_ui()
+        self.resizable(True, True)
+        self.minsize(900, 600)
         self.refresh_routes()
         self._preseed_grib_path()
 
@@ -137,58 +163,49 @@ class PassagePlanningTool(VNCToolWindow):
         table_frame = tk.Frame(self.content_frame, bg=self.COLOR_BG)
         table_frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = (
-            "time",
-            "leg",
-            "lat",
-            "lon",
-            "course",
-            "run_nm",
-            "remain_nm",
-            "twd",
-            "tws",
-            "twa",
-            "aws",
-            "awa",
+        self.plan_sheet = Sheet(
+            table_frame,
+            headers=self.table_headers,
+            data=[],
+            show_row_index=False,
+            show_x_scrollbar=True,
+            show_y_scrollbar=True,
+            align="center",
+            header_align="center",
+            theme="dark blue",
         )
-        self.plan_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
-        self.plan_tree.heading("time", text="UTC")
-        self.plan_tree.heading("leg", text="Leg")
-        self.plan_tree.heading("lat", text="Lat")
-        self.plan_tree.heading("lon", text="Lon")
-        self.plan_tree.heading("course", text="Course T")
-        self.plan_tree.heading("run_nm", text="Run NM")
-        self.plan_tree.heading("remain_nm", text="Remain NM")
-        self.plan_tree.heading("twd", text="TWD°")
-        self.plan_tree.heading("tws", text="TWS kt")
-        self.plan_tree.heading("twa", text="TWA°")
-        self.plan_tree.heading("aws", text="AWS kt")
-        self.plan_tree.heading("awa", text="AWA°")
+        self.plan_sheet.enable_bindings()
+        self.plan_sheet.pack(fill=tk.BOTH, expand=True)
 
-        widths = {
-            "time": 130,
-            "leg": 115,
-            "lat": 88,
-            "lon": 88,
-            "course": 68,
-            "run_nm": 70,
-            "remain_nm": 82,
-            "twd": 58,
-            "tws": 58,
-            "twa": 58,
-            "aws": 58,
-            "awa": 58,
-        }
-        for name, width in widths.items():
-            self.plan_tree.column(name, width=width, anchor=tk.CENTER)
+        self._sheet_set_column_widths([130, 115, 88, 88, 68, 70, 82, 58, 58, 58, 58, 58, 60, 60, 60])
 
-        y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.plan_tree.yview)
-        x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.plan_tree.xview)
-        self.plan_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        # --- GRIB timeline slider -------------------------------------------
+        slider_outer = tk.Frame(self.content_frame, bg=self.COLOR_BG)
+        slider_outer.pack(fill=tk.X, pady=(6, 0))
 
-        self.plan_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        x_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Label(
+            slider_outer, text="Departure window",
+            font=self.font_small, bg=self.COLOR_BG, fg="#a8d8ff",
+        ).pack(anchor="w")
+
+        self._slider_frame = tk.Frame(slider_outer, bg=self.COLOR_BG)
+        self._slider_frame.pack(fill=tk.X)
+
+        self._slider_canvas = tk.Canvas(
+            self._slider_frame, height=28,
+            bg="#1e2a38", highlightthickness=1, highlightbackground="#4a6fa5",
+        )
+        self._slider_canvas.pack(fill=tk.X, padx=4)
+
+        self._slider_label_left  = tk.Label(self._slider_frame, text="", font=("Arial", 9), bg=self.COLOR_BG, fg="#7f8c8d")
+        self._slider_label_right = tk.Label(self._slider_frame, text="", font=("Arial", 9), bg=self.COLOR_BG, fg="#7f8c8d")
+        self._slider_label_left.pack(side=tk.LEFT, padx=4)
+        self._slider_label_right.pack(side=tk.RIGHT, padx=4)
+
+        self._slider_canvas.bind("<ButtonPress-1>",   self._slider_press)
+        self._slider_canvas.bind("<B1-Motion>",       self._slider_drag)
+        self._slider_canvas.bind("<ButtonRelease-1>", self._slider_release)
+        self._slider_canvas.bind("<Configure>",       lambda _e: self._redraw_slider())
 
     def refresh_routes(self) -> None:
         try:
@@ -239,6 +256,7 @@ class PassagePlanningTool(VNCToolWindow):
         try:
             self.grib_reader = GribReader(path)
             self.status_var.set(f"GRIB loaded – {self.grib_reader.coverage_summary()}")
+            self._redraw_slider()
         except ImportError as exc:
             self.grib_reader = None
             self.show_error(
@@ -275,27 +293,23 @@ class PassagePlanningTool(VNCToolWindow):
         if not self.route_data:
             return
 
+        preview_rows = []
         for waypoint in self.route_data["waypoints"]:
             sequence = waypoint.get("sequence")
             label = waypoint.get("name") or f"WP {sequence if sequence is not None else '?'}"
-            self.plan_tree.insert(
-                "",
-                tk.END,
-                values=(
+            preview_rows.append(
+                (
                     f"WP {sequence}" if sequence is not None else "WP",
                     label,
                     f"{waypoint['lat']:.4f}",
                     f"{waypoint['lon']:.4f}",
-                    "--",
-                    "--",
-                    "--",
-                    "--",
-                    "--",
-                    "--",
-                    "--",
-                    "--",
+                    "--", "--", "--",
+                    "--", "--", "--", "--", "--",
+                    "--", "--", "--",
                 ),
             )
+
+        self._sheet_set_data(preview_rows, redraw=True)
 
     def generate_plan(self) -> None:
         if not self.route_data:
@@ -318,19 +332,128 @@ class PassagePlanningTool(VNCToolWindow):
             self.show_error("Boat Speed", "Boat speed must be greater than zero.")
             return
 
+        # Warn if departure is too late for GRIB coverage.
+        if self.grib_reader and self.grib_reader.valid_times:
+            total_nm = self.route_total_nm(self.route_data["waypoints"])
+            passage_hours = total_nm / speed_kn
+            eta = departure_utc + timedelta(hours=passage_hours)
+            grib_end = self.grib_reader.valid_times[-1]
+            if eta > grib_end:
+                latest_departure = grib_end - timedelta(hours=passage_hours)
+                answer = self._ask_departure_adjustment(
+                    eta, grib_end, latest_departure
+                )
+                if answer == "adjust":
+                    departure_utc = latest_departure.replace(
+                        minute=0, second=0, microsecond=0
+                    )
+                    self.departure_var.set(departure_utc.strftime("%Y-%m-%d %H:%M"))
+                elif answer == "cancel":
+                    return
+
         rows = self.build_passage_rows(self.route_data["waypoints"], departure_utc, speed_kn)
         self.clear_table()
-        for row in rows:
-            self.plan_tree.insert("", tk.END, values=row)
+        self._sheet_set_data(rows, redraw=False)
+        self._apply_twa_cell_highlights(rows)
+        self._sheet_redraw()
 
         total_nm = self.route_total_nm(self.route_data["waypoints"])
         total_hours = total_nm / speed_kn if speed_kn > 0 else 0.0
         eta = departure_utc + timedelta(hours=total_hours)
-        grib_note = "Wind data from GRIB." if self.grib_reader else "No GRIB loaded — wind columns are placeholders."
+        if self.grib_reader and self.grib_reader.valid_times:
+            grib_end = self.grib_reader.valid_times[-1].strftime("%Y-%m-%d %H:%MZ")
+            grib_note = f"Wind data from GRIB (coverage ends {grib_end})."
+        else:
+            grib_note = "No GRIB loaded — wind columns are placeholders."
         self.status_var.set(
             f"Built {len(rows)} timeline rows at {TIMELINE_STEP_HOURS}-hour spacing. "
             f"ETA approx {eta.strftime('%Y-%m-%d %H:%M UTC')}. {grib_note}"
         )
+
+    def _ask_departure_adjustment(
+        self,
+        eta: datetime,
+        grib_end: datetime,
+        latest_departure: datetime,
+    ) -> str:
+        """
+        Show a dialog warning that ETA exceeds GRIB coverage.
+
+        Returns 'adjust' if user wants the departure auto-adjusted,
+                'proceed' to build with out-of-coverage rows anyway,
+                'cancel' to abort.
+        """
+        result = {"choice": "cancel"}
+
+        win = tk.Toplevel(self)
+        win.title("Departure Too Late for GRIB")
+        win.configure(bg=self.COLOR_BG)
+        win.grab_set()
+        win.resizable(False, False)
+
+        msg = (
+            f"At this speed the ETA is:\n"
+            f"  {eta.strftime('%Y-%m-%d %H:%MZ')}\n\n"
+            f"But GRIB coverage ends at:\n"
+            f"  {grib_end.strftime('%Y-%m-%d %H:%MZ')}\n\n"
+            f"Latest valid departure for full GRIB coverage:\n"
+            f"  {latest_departure.strftime('%Y-%m-%d %H:%MZ')}\n\n"
+            f"Rows beyond GRIB coverage will still be built\n"
+            f"but wind data will be clamped to the last forecast."
+        )
+        tk.Label(
+            win, text=msg, font=self.font_normal, bg=self.COLOR_BG,
+            fg=self.COLOR_FG, justify=tk.LEFT, padx=18, pady=12,
+        ).pack()
+
+        btn_frame = tk.Frame(win, bg=self.COLOR_BG)
+        btn_frame.pack(pady=(0, 12))
+
+        def _choose(choice: str) -> None:
+            result["choice"] = choice
+            win.destroy()
+
+        tk.Button(
+            btn_frame, text="Use latest valid departure",
+            command=lambda: _choose("adjust"),
+            bg="#27ae60", fg="white", padx=10, pady=4,
+        ).pack(side=tk.LEFT, padx=6)
+        tk.Button(
+            btn_frame, text="Build anyway",
+            command=lambda: _choose("proceed"),
+            bg="#e67e22", fg="white", padx=10, pady=4,
+        ).pack(side=tk.LEFT, padx=6)
+        tk.Button(
+            btn_frame, text="Cancel",
+            command=lambda: _choose("cancel"),
+            bg="#7f8c8d", fg="white", padx=10, pady=4,
+        ).pack(side=tk.LEFT, padx=6)
+
+        self.wait_window(win)
+        return result["choice"]
+
+    def _row_is_upwind_twa(self, row: tuple) -> bool:
+        """Return True when TWA is in the -50° to +50° range."""
+        if len(row) <= self.twa_column_index:
+            return False
+
+        twa_text = str(row[self.twa_column_index]).strip()
+        if twa_text in {"--", ""}:
+            return False
+
+        try:
+            twa_value = float(twa_text.replace("°", ""))
+        except ValueError:
+            return False
+
+        return -50.0 <= twa_value <= 50.0
+
+    def _apply_twa_cell_highlights(self, rows: list[tuple]) -> None:
+        """Color only the TWA cell amber when it is between -50° and +50°."""
+        self._sheet_clear_highlights()
+        for row_index, row in enumerate(rows):
+            if self._row_is_upwind_twa(row):
+                self._sheet_highlight_cell(row_index, self.twa_column_index, bg="#ffbf00", fg="#1a1a1a")
 
     def build_passage_rows(self, waypoints: list[dict], departure_utc: datetime, speed_kn: float) -> list[tuple]:
         if len(waypoints) < 2:
@@ -399,6 +522,36 @@ class PassagePlanningTool(VNCToolWindow):
         except Exception:
             return "--", "--", "--", "--", "--"
 
+    def _wave_columns(self, lat: float, lon: float, time_utc: datetime, course_deg: float) -> tuple[str, str, str]:
+        """Return (wv_dir, wv_ang, wv_ht) strings, allowing height-only GRIBs."""
+        if self.grib_reader is None:
+            return "--", "--", "--"
+
+        wv_dir_text = "--"
+        wv_ang_text = "--"
+        wv_ht_text = "--"
+
+        try:
+            if self.grib_reader.has_wave_height:
+                h = self.grib_reader.wave_height_at(lat, lon, time_utc)
+                if math.isfinite(h):
+                    wv_ht_text = f"{max(0.0, h):.1f}"
+        except Exception:
+            pass
+
+        try:
+            if self.grib_reader.has_wave_direction:
+                d = self.grib_reader.wave_direction_at(lat, lon, time_utc)
+                if math.isfinite(d):
+                    a = (d - course_deg + 180.0) % 360.0 - 180.0
+                    if math.isfinite(a):
+                        wv_dir_text = f"{d:.0f}°"
+                        wv_ang_text = f"{'+' if a >= 0 else ''}{a:.0f}°"
+        except Exception:
+            pass
+
+        return wv_dir_text, wv_ang_text, wv_ht_text
+
     def row_for_distance(self, segments: list[dict], run_nm: float, total_nm: float, time_utc: datetime, speed_kn: float = 5.0) -> tuple:
         for segment in segments:
             seg_start = segment["start_cumulative_nm"]
@@ -412,6 +565,7 @@ class PassagePlanningTool(VNCToolWindow):
                 start_name = segment["start"].get("name") or f"WP {segment['start'].get('sequence', '?')}"
                 end_name = segment["end"].get("name") or f"WP {segment['end'].get('sequence', '?')}"
                 twd, tws, twa, aws, awa = self._wind_columns(lat, lon, time_utc, segment["bearing_deg"], speed_kn)
+                wvdir, wvang, wvht = self._wave_columns(lat, lon, time_utc, segment["bearing_deg"])
                 return (
                     time_utc.strftime("%Y-%m-%d %H:%M"),
                     f"{start_name}->{end_name}",
@@ -420,11 +574,8 @@ class PassagePlanningTool(VNCToolWindow):
                     f"{segment['bearing_deg']:.0f}°",
                     f"{run_nm:.1f}",
                     f"{max(0.0, total_nm - run_nm):.1f}",
-                    twd,
-                    tws,
-                    twa,
-                    aws,
-                    awa,
+                    twd, tws, twa, aws, awa,
+                    wvdir, wvang, wvht,
                 )
 
         final = segments[-1]
@@ -432,6 +583,7 @@ class PassagePlanningTool(VNCToolWindow):
         lon = final["end"]["lon"]
         end_name = final["end"].get("name") or f"WP {final['end'].get('sequence', '?')}"
         twd, tws, twa, aws, awa = self._wind_columns(lat, lon, time_utc, final["bearing_deg"], speed_kn)
+        wvdir, wvang, wvht = self._wave_columns(lat, lon, time_utc, final["bearing_deg"])
         return (
             time_utc.strftime("%Y-%m-%d %H:%M"),
             end_name,
@@ -440,11 +592,8 @@ class PassagePlanningTool(VNCToolWindow):
             f"{final['bearing_deg']:.0f}°",
             f"{total_nm:.1f}",
             "0.0",
-            twd,
-            tws,
-            twa,
-            aws,
-            awa,
+            twd, tws, twa, aws, awa,
+            wvdir, wvang, wvht,
         )
 
     def route_total_nm(self, waypoints: list[dict]) -> float:
@@ -459,8 +608,245 @@ class PassagePlanningTool(VNCToolWindow):
         return total_nm
 
     def clear_table(self) -> None:
-        for item in self.plan_tree.get_children():
-            self.plan_tree.delete(item)
+        self._sheet_set_data([], redraw=True)
+
+    # ------------------------------------------------------------------
+    # GRIB timeline slider
+    # ------------------------------------------------------------------
+
+    def _slider_passage_hours(self) -> float:
+        """Return passage duration in hours from current route + speed, or 0."""
+        if not self.route_data:
+            return 0.0
+        try:
+            speed_kn = float(self.speed_var.get())
+        except ValueError:
+            return 0.0
+        if speed_kn <= 0:
+            return 0.0
+        total_nm = self.route_total_nm(self.route_data["waypoints"])
+        return total_nm / speed_kn
+
+    def _slider_departure_fraction(self) -> float:
+        """Current departure as a fraction [0,1] within the GRIB window."""
+        if not self.grib_reader or not self.grib_reader.valid_times:
+            return 0.0
+        grib_start = self.grib_reader.valid_times[0]
+        grib_end   = self.grib_reader.valid_times[-1]
+        grib_span  = (grib_end - grib_start).total_seconds()
+        if grib_span <= 0:
+            return 0.0
+        try:
+            dep = datetime.strptime(
+                self.departure_var.get().strip(), "%Y-%m-%d %H:%M"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            dep = grib_start
+        offset = (dep - grib_start).total_seconds()
+        return max(0.0, min(1.0, offset / grib_span))
+
+    def _snap_to_grib_time(self, dt_utc: datetime) -> datetime:
+        """Snap a UTC datetime to the nearest GRIB valid_time step."""
+        if not self.grib_reader or not self.grib_reader.valid_times:
+            return dt_utc
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+
+        return min(
+            self.grib_reader.valid_times,
+            key=lambda t: abs((t - dt_utc).total_seconds()),
+        )
+
+    def _redraw_slider(self) -> None:
+        """Repaint the GRIB timeline canvas."""
+        c = self._slider_canvas
+        c.delete("all")
+
+        if not self.grib_reader or not self.grib_reader.valid_times:
+            c.create_text(
+                10, 14, anchor="w", text="Load a GRIB file to enable the departure slider.",
+                fill="#4a6fa5", font=("Arial", 9),
+            )
+            self._slider_label_left.config(text="")
+            self._slider_label_right.config(text="")
+            return
+
+        grib_start  = self.grib_reader.valid_times[0]
+        grib_end    = self.grib_reader.valid_times[-1]
+        grib_span_h = (grib_end - grib_start).total_seconds() / 3600.0
+
+        self._slider_label_left.config(text=grib_start.strftime("%Y-%m-%d %H:%MZ"))
+        self._slider_label_right.config(text=grib_end.strftime("%Y-%m-%d %H:%MZ"))
+
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w < 10:
+            return
+
+        pad = 4
+        track_w = w - 2 * pad
+
+        # Background track
+        c.create_rectangle(pad, 6, pad + track_w, h - 6, fill="#2c3e50", outline="#4a6fa5")
+
+        passage_hours = self._slider_passage_hours()
+        if grib_span_h > 0 and passage_hours > 0:
+            thumb_frac  = min(1.0, passage_hours / grib_span_h)
+            thumb_w     = max(8, int(track_w * thumb_frac))
+            dep_frac    = self._slider_departure_fraction()
+            max_dep_frac = max(0.0, 1.0 - thumb_frac)
+            dep_frac    = min(dep_frac, max_dep_frac)
+            thumb_x     = pad + int(dep_frac * track_w)
+
+            # Shade the out-of-passage region in red if ETA > GRIB end
+            eta_frac = dep_frac + thumb_frac
+            if eta_frac > 1.0:
+                overflow_x = pad + track_w
+                c.create_rectangle(
+                    pad + int(track_w), 6, pad + track_w, h - 6,
+                    fill="#7f1c1c", outline="",
+                )
+
+            # Thumb
+            c.create_rectangle(
+                thumb_x, 4, thumb_x + thumb_w, h - 4,
+                fill="#2980b9", outline="#5dade2", width=1,
+            )
+            # Departure label inside thumb
+            dep_str = self.departure_var.get().strip()[-5:]  # HH:MM
+            c.create_text(
+                thumb_x + thumb_w // 2, h // 2,
+                text=dep_str, fill="white", font=("Arial", 9, "bold"),
+                anchor="center",
+            )
+        else:
+            c.create_text(
+                w // 2, h // 2,
+                text="Load a route and set boat speed to size the thumb.",
+                fill="#4a6fa5", font=("Arial", 9), anchor="center",
+            )
+
+    def _slider_press(self, event: tk.Event) -> None:
+        self._slider_dragging = True
+        self._slider_drag_start_x = event.x
+        self._slider_drag_start_frac = self._slider_departure_fraction()
+
+    def _slider_drag(self, event: tk.Event) -> None:
+        if not self._slider_dragging or not self.grib_reader:
+            return
+        c = self._slider_canvas
+        w = c.winfo_width()
+        pad = 4
+        track_w = w - 2 * pad
+        if track_w <= 0:
+            return
+
+        delta_px   = event.x - self._slider_drag_start_x
+        delta_frac = delta_px / track_w
+
+        grib_start  = self.grib_reader.valid_times[0]
+        grib_end    = self.grib_reader.valid_times[-1]
+        grib_span_h = (grib_end - grib_start).total_seconds() / 3600.0
+
+        passage_hours = self._slider_passage_hours()
+        thumb_frac = passage_hours / grib_span_h if grib_span_h > 0 else 0.0
+        max_frac   = max(0.0, 1.0 - thumb_frac)
+
+        new_frac = max(0.0, min(max_frac, self._slider_drag_start_frac + delta_frac))
+        new_dep  = grib_start + timedelta(seconds=new_frac * grib_span_h * 3600)
+        # Snap to nearest GRIB timestamp so generated rows align with available forecast steps.
+        new_dep  = self._snap_to_grib_time(new_dep)
+        self.departure_var.set(new_dep.strftime("%Y-%m-%d %H:%M"))
+        self._redraw_slider()
+
+    def _slider_release(self, _event: tk.Event) -> None:
+        self._slider_dragging = False
+        # Auto-rebuild if a route is loaded
+        if self.route_data:
+            self.generate_plan()
+
+    # ------------------------------------------------------------------
+    # tksheet compatibility wrappers
+    # ------------------------------------------------------------------
+
+    def _sheet_set_column_widths(self, widths: list[int]) -> None:
+        """Set column widths with compatibility for different tksheet versions."""
+        try:
+            self.plan_sheet.set_column_widths(widths, redraw=False)
+            return
+        except TypeError:
+            pass
+
+        try:
+            self.plan_sheet.set_column_widths(widths)
+        except TypeError:
+            for idx, width in enumerate(widths):
+                try:
+                    self.plan_sheet.column_width(column=idx, width=width, redraw=False)
+                except TypeError:
+                    self.plan_sheet.column_width(column=idx, width=width)
+
+    def _sheet_set_data(self, rows: list[tuple], redraw: bool) -> None:
+        """Set sheet data with compatibility for different tksheet versions."""
+        try:
+            self.plan_sheet.set_sheet_data(rows, reset_col_positions=False, redraw=redraw)
+            return
+        except TypeError:
+            pass
+
+        try:
+            self.plan_sheet.set_sheet_data(rows, reset_col_positions=False)
+        except TypeError:
+            self.plan_sheet.set_sheet_data(rows)
+
+        if redraw:
+            self._sheet_redraw()
+
+    def _sheet_clear_highlights(self) -> None:
+        """Clear any prior cell highlights across tksheet versions."""
+        if hasattr(self.plan_sheet, "dehighlight_all"):
+            self.plan_sheet.dehighlight_all()
+            return
+
+        if hasattr(self.plan_sheet, "dehighlight_cells"):
+            try:
+                self.plan_sheet.dehighlight_cells(all_=True)
+            except TypeError:
+                self.plan_sheet.dehighlight_cells()
+
+    def _sheet_highlight_cell(self, row: int, column: int, bg: str, fg: str) -> None:
+        """Highlight a single cell with compatibility for different tksheet versions."""
+        if hasattr(self.plan_sheet, "highlight_cells"):
+            try:
+                self.plan_sheet.highlight_cells(
+                    row=row,
+                    column=column,
+                    bg=bg,
+                    fg=fg,
+                    redraw=False,
+                )
+                return
+            except TypeError:
+                try:
+                    self.plan_sheet.highlight_cells(
+                        row=row,
+                        column=column,
+                        bg=bg,
+                        fg=fg,
+                    )
+                    return
+                except TypeError:
+                    pass
+
+        if hasattr(self.plan_sheet, "highlight_cells_at"):
+            self.plan_sheet.highlight_cells_at(row=row, column=column, bg=bg, fg=fg)
+
+    def _sheet_redraw(self) -> None:
+        """Request a redraw across tksheet versions."""
+        if hasattr(self.plan_sheet, "redraw"):
+            self.plan_sheet.redraw()
+        elif hasattr(self.plan_sheet, "refresh"):
+            self.plan_sheet.refresh()
 
 
 if __name__ == "__main__":

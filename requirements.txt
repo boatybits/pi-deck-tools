@@ -19,6 +19,9 @@ requests>=2.31
 # Image handling
 Pillow>=10.0
 
+# Spreadsheet-like table widget with per-cell formatting
+tksheet>=7.3
+
 # tkinter is part of Python stdlib — ensure python3-tk is installed on the Pi:
 # sudo apt install python3-tk
 
