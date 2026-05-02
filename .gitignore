@@ -16,7 +16,7 @@ build/
 *.egg-info/
 
 # Ephemeris / large data files (download separately on Pi)
-data/*.bsp
+# de421.bsp and hip_main.dat ARE tracked — required for starmap app
 
 # GRIB weather files (download fresh from XyGrib on Pi)
 data/*.grb
@@ -42,4 +42,3 @@ Thumbs.db
 
 # Generated reports / downloaded catalogs
 celestial_nav_*.pdf
-data/hip_main.dat
