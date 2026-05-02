@@ -18,6 +18,13 @@ build/
 # Ephemeris / large data files (download separately on Pi)
 data/*.bsp
 
+# GRIB weather files (download fresh from XyGrib on Pi)
+data/*.grb
+data/*.grb2
+data/*.grib
+data/*.grib2
+data/*.idx
+
 # IDE
 .vscode/settings.json
 .idea/
