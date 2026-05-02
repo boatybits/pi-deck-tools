@@ -1,0 +1,8 @@
+# Treat binary data files as binary so Git never mangles line endings
+data/*.bsp    binary
+data/*.dat    binary
+data/*.grb    binary
+data/*.grb2   binary
+data/*.grib   binary
+data/*.grib2  binary
+data/*.idx    binary
