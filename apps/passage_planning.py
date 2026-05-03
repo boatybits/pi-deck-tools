@@ -22,6 +22,7 @@ import math
 import re
 import sys
 import tkinter as tk
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -31,7 +32,7 @@ from tksheet import Sheet
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.grib_reader import GribReader
-from shared.opencpn_db import OpenCPNDbError, create_planner_route, list_routes, route_with_waypoints
+from shared.opencpn_db import OpenCPNDbError, list_routes, route_with_waypoints
 from shared.vnc_window import VNCToolWindow
 
 
@@ -246,8 +247,8 @@ class PassagePlanningTool(VNCToolWindow):
         tk.Button(plan_row, text="Build 3h Table", command=self.generate_plan, bg="#27ae60", fg="white", padx=14).pack(side=tk.LEFT)
         tk.Button(
             plan_row,
-            text="Create OpenCPN Planner Route",
-            command=self.create_planner_route_in_opencpn,
+            text="Export Planner GPX",
+            command=self.export_planner_gpx,
             bg="#1f618d",
             fg="white",
             padx=12,
@@ -523,10 +524,10 @@ class PassagePlanningTool(VNCToolWindow):
             f"ETA approx {eta.strftime('%Y-%m-%d %H:%M UTC')}. {grib_note}"
         )
 
-    def create_planner_route_in_opencpn(self) -> None:
-        """Create or replace '<route>_planner' in OpenCPN using timeline points."""
+    def export_planner_gpx(self) -> None:
+        """Export '<route>_planner' timeline points as a GPX route for OpenCPN import."""
         if not self.route_data:
-            self.show_error("No Route", "Load a route before creating a planner route.")
+            self.show_error("No Route", "Load a route before exporting a planner GPX.")
             return
 
         route_name = self.route_data.get("route_name", self.route_var.get().strip())
@@ -541,39 +542,76 @@ class PassagePlanningTool(VNCToolWindow):
 
         points = self._build_timeline_points(self.route_data["waypoints"], departure_utc, speed_kn)
         if not points:
-            self.show_error("Planner Route", "Could not build timeline points for planner route.")
+            self.show_error("Planner GPX", "Could not build timeline points for planner GPX.")
             return
 
         planner_route_name = f"{route_name}_planner"
-        if not messagebox.askyesno(
-            "Create Planner Route",
-            (
-                f"Create or replace OpenCPN route '{planner_route_name}' with "
-                f"{len(points)} waypoints from the current timeline?"
-            ),
-            parent=self,
-        ):
-            return
-
-        upload_points = [
+        gpx_points = [
             {
                 "name": self._planner_waypoint_name(point["time_utc"]),
                 "lat": point["lat"],
                 "lon": point["lon"],
+                "time_utc": point["time_utc"],
             }
             for point in points
         ]
 
+        default_filename = f"{planner_route_name}.gpx"
+        save_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Export Planner GPX",
+            defaultextension=".gpx",
+            initialfile=default_filename,
+            filetypes=[("GPX files", "*.gpx"), ("All files", "*.*")],
+        )
+        if not save_path:
+            return
+
         try:
-            result = create_planner_route(route_name, upload_points)
-        except OpenCPNDbError as exc:
-            self.show_error("Planner Route Error", str(exc))
+            self._write_planner_gpx(Path(save_path), planner_route_name, gpx_points)
+        except Exception as exc:
+            self.show_error("Planner GPX Error", str(exc))
             return
 
         self.summary_var.set(
-            f"OpenCPN route '{result['route_name']}' updated with {result['waypoint_count']} planner waypoints. "
-            f"Backup: {result.get('backup_path', 'n/a')}"
+            f"Planner GPX exported: {save_path} ({len(gpx_points)} waypoints). "
+            f"Import into OpenCPN via Route & Mark Manager -> Import GPX."
         )
+
+    def _write_planner_gpx(self, output_path: Path, route_name: str, points: list[dict]) -> None:
+        """Write GPX 1.1 route points for OpenCPN import."""
+        ns = "http://www.topografix.com/GPX/1/1"
+        ET.register_namespace("", ns)
+
+        gpx = ET.Element(
+            f"{{{ns}}}gpx",
+            {
+                "version": "1.1",
+                "creator": "pi-deck-tools passage_planning",
+            },
+        )
+        metadata = ET.SubElement(gpx, f"{{{ns}}}metadata")
+        ET.SubElement(metadata, f"{{{ns}}}time").text = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        rte = ET.SubElement(gpx, f"{{{ns}}}rte")
+        ET.SubElement(rte, f"{{{ns}}}name").text = route_name
+
+        for point in points:
+            rtept = ET.SubElement(
+                rte,
+                f"{{{ns}}}rtept",
+                {
+                    "lat": f"{float(point['lat']):.6f}",
+                    "lon": f"{float(point['lon']):.6f}",
+                },
+            )
+            ET.SubElement(rtept, f"{{{ns}}}name").text = str(point.get("name") or "Planner")
+            time_utc = point.get("time_utc")
+            if isinstance(time_utc, datetime):
+                ET.SubElement(rtept, f"{{{ns}}}time").text = time_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        tree = ET.ElementTree(gpx)
+        tree.write(output_path, encoding="utf-8", xml_declaration=True)
 
     def _ask_departure_adjustment(
         self,
