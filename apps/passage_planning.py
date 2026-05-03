@@ -571,7 +571,8 @@ class PassagePlanningTool(VNCToolWindow):
             return
 
         self.summary_var.set(
-            f"OpenCPN route '{result['route_name']}' updated with {result['waypoint_count']} planner waypoints."
+            f"OpenCPN route '{result['route_name']}' updated with {result['waypoint_count']} planner waypoints. "
+            f"Backup: {result.get('backup_path', 'n/a')}"
         )
 
     def _ask_departure_adjustment(
