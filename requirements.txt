@@ -25,6 +25,9 @@ tksheet>=7.3
 # tkinter is part of Python stdlib — ensure python3-tk is installed on the Pi:
 # sudo apt install python3-tk
 
+# InfluxDB client for Python
+influxdb-client>=1.41
+
 # GRIB weather file reading (passage planning)
 # Requires system ecCodes library on the Pi first:
 #   sudo apt install libeccodes-dev libeccodes-tools
